@@ -1,0 +1,71 @@
+import torch, random, numpy as np
+from torch import nn
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+
+
+DEPTH_LINEAR = 42          
+HIDDEN_DIM   = 256
+BATCH_SIZE   = 128
+EPOCHS       = 20
+LR           = 1e-3
+DEVICE       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+SEED         = 42
+
+torch.manual_seed(SEED); random.seed(SEED); np.random.seed(SEED)
+if DEVICE.type == 'cuda': torch.cuda.manual_seed_all(SEED)
+
+class DeepMLP_BN(nn.Module):
+    """42 个 Linear + BatchNorm + ReLU"""
+    def __init__(self, in_dim, h_dim, n_class, depth):
+        super().__init__()
+        layers = [nn.Linear(in_dim, h_dim, bias=False),
+                  nn.BatchNorm1d(h_dim), nn.ReLU()]
+        for _ in range(depth-2):
+            layers += [nn.Linear(h_dim, h_dim, bias=False),
+                       nn.BatchNorm1d(h_dim), nn.ReLU()]
+        layers.append(nn.Linear(h_dim, n_class))
+        self.net = nn.Sequential(*layers)
+
+        # Kaiming 初始化
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+
+    def forward(self, x):
+        return self.net(x.flatten(start_dim=1))
+
+@torch.no_grad()
+def accuracy(model, loader):
+    model.eval(); corr = tot = 0
+    for x, y in loader:
+        pred = model(x.to(DEVICE)).argmax(1)
+        corr += (pred == y.to(DEVICE)).sum().item(); tot += y.size(0)
+    return corr / tot
+
+# --------- 训练 ----------
+def train():
+    tf = transforms.Compose([transforms.ToTensor(),
+                             transforms.Normalize((0.1307,), (0.3081,))])
+    tr = datasets.MNIST('./data', True , download=True, transform=tf)
+    te = datasets.MNIST('./data', False, download=True, transform=tf)
+    tr_loader = DataLoader(tr, BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    te_loader = DataLoader(te, BATCH_SIZE, shuffle=False)
+
+    model = DeepMLP_BN(28*28, HIDDEN_DIM, 10, DEPTH_LINEAR).to(DEVICE)
+    opt  = torch.optim.Adam(model.parameters(), lr=LR)
+    loss_fn = nn.CrossEntropyLoss()
+
+    for ep in range(1, EPOCHS+1):
+        model.train(); running = 0; n = 0
+        for x, y in tr_loader:
+            x, y = x.to(DEVICE), y.to(DEVICE)
+            out  = model(x); loss = loss_fn(out, y)
+            opt.zero_grad(); loss.backward(); opt.step()
+            running += loss.item(); n += 1
+        print(f"Epoch {ep:02d} | Loss {running/n:.4f} | "
+              f"Train {accuracy(model,tr_loader)*100:.2f}% | "
+              f"Test {accuracy(model,te_loader)*100:.2f}%")
+
+if __name__ == "__main__":
+    train()
